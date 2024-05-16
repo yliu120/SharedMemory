@@ -6,3 +6,4 @@ bazel-SharedMemory
 bazel-testlogs
 .git
 SECRETS
+.vscode
