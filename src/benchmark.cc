@@ -1,8 +1,6 @@
 #include <cassert>
-#include <condition_variable>
 #include <ctime>
 #include <iostream>
-#include <mutex>
 #include <random>
 #include <string_view>
 
@@ -15,8 +13,6 @@
 namespace prototype {
 
 constexpr int kNumThreads = 32;
-constexpr int kNumProducers = 2;
-constexpr int kNumConsumers = 1;
 constexpr int kNumSignals = 32;
 constexpr std::string_view kAddress = "tcp://localhost:5666";
 
@@ -43,25 +39,19 @@ static void BM_MessagePassing(benchmark::State& state) {
   std::vector<ProducerContext> producer_contexts;
   for (auto _ : state) {
     state.PauseTiming();
-    ThreadPool pool(kNumThreads * 2);
-
-    // Synchronization mechanism that allows the first thread to bind and others
-    // to connect.
-    bool is_bound = false;
-    std::mutex mu;
-    std::condition_variable init_done;
+    ThreadPool pool(kNumThreads);
+    int num_producers = state.range(0);
 
     state.ResumeTiming();
     // Registers producers.
-    for (int i = 0; i < kNumProducers; i++) {
-      pool.EnqueueWork([i, &producer_contexts] {
+    for (int i = 0; i < num_producers; i++) {
+      pool.EnqueueWork([i, &producer_contexts, num_producers] {
         void* producer_context = zmq_ctx_new();
         void* producer = zmq_socket(producer_context, ZMQ_PUSH);
-        int producer_comm = -1;
+        int producer_comm = zmq_connect(producer, kAddress.data());
+        (void)producer_comm;
 
-        producer_comm = zmq_connect(producer, kAddress.data());
-
-        for (int j = 0; j < kNumSignals / kNumProducers; j++) {
+        for (int j = 0; j < kNumSignals / num_producers; j++) {
           auto signal = RandomSignalProducer(i * 10000 + j);
           std::string serialized = signal->SerializeToString();
           // Blocking mode.
@@ -81,8 +71,10 @@ static void BM_MessagePassing(benchmark::State& state) {
     }
 
     // Registers consumers.
+    // Larger than 1 is not able to work. ZMQ is quite problematic.
+    constexpr int kNumConsumers = 1;
     for (int i = 0; i < kNumConsumers; i++) {
-      pool.EnqueueWork([p = processor.get(), &mu, &init_done, &is_bound, i] {
+      pool.EnqueueWork([p = processor.get(), i] {
         void* consumer_context = zmq_ctx_new();
         void* consumer = zmq_socket(consumer_context, ZMQ_PULL);
 
@@ -93,7 +85,6 @@ static void BM_MessagePassing(benchmark::State& state) {
         for (int j = 0; j < kNumSignals / kNumConsumers; j++) {
           std::string buffer(sizeof(Signal), '\0');
           // Blocking mode.
-
           int size = zmq_recv(consumer, buffer.data(), buffer.size(), 0);
           if (size == 0) {
             break;
@@ -109,6 +100,7 @@ static void BM_MessagePassing(benchmark::State& state) {
     }
     pool.Quiesce();
   }
+  // Manage the life time of the contexts and sockets?
   // for (auto& context : producer_contexts) {
   //   zmq_close(context.producer);
   //   zmq_ctx_destroy(context.producer_context);
@@ -116,7 +108,7 @@ static void BM_MessagePassing(benchmark::State& state) {
 }
 
 // Register the function as a benchmark
-BENCHMARK(BM_MessagePassing);
+BENCHMARK(BM_MessagePassing)->Arg(1)->Arg(2)->Arg(4);
 
 }  // namespace prototype
 
